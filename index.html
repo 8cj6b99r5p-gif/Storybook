@@ -1,0 +1,80 @@
+
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>DreamWeaver Kids Books</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Comic+Neue:wght@300;400;700&family=Lora:ital,wght@0,400;0,600;1,400&display=swap" rel="stylesheet">
+    <script>
+      tailwind.config = {
+        theme: {
+          extend: {
+            fontFamily: {
+              'story': ['Lora', 'serif'],
+              'comic': ['Comic Neue', 'cursive'],
+            },
+            colors: {
+              'parchment': '#fdf6e3',
+              'parchment-dark': '#eee8d5',
+              'magic-blue': '#268bd2',
+              'magic-purple': '#6c71c4',
+            },
+            animation: {
+              'ken-burns': 'ken-burns 20s ease-in-out infinite alternate',
+            },
+            keyframes: {
+              'ken-burns': {
+                '0%': { transform: 'scale(1) translate(0, 0)' },
+                '50%': { transform: 'scale(1.1) translate(-1%, -1%)' },
+                '100%': { transform: 'scale(1) translate(1%, 1%)' },
+              }
+            }
+          }
+        }
+      }
+    </script>
+    <style>
+      ::-webkit-scrollbar {
+        width: 8px;
+        height: 8px;
+      }
+      ::-webkit-scrollbar-track {
+        background: #fdf6e3; 
+      }
+      ::-webkit-scrollbar-thumb {
+        background: #d3cbb8; 
+        border-radius: 4px;
+      }
+      ::-webkit-scrollbar-thumb:hover {
+        background: #93a1a1; 
+      }
+      .book-shadow {
+        box-shadow: 
+          0 4px 6px -1px rgba(0, 0, 0, 0.1), 
+          0 2px 4px -1px rgba(0, 0, 0, 0.06),
+          inset 0 0 20px rgba(0,0,0,0.05);
+      }
+      .perspective-1000 {
+        perspective: 1000px;
+      }
+    </style>
+  <script type="importmap">
+{
+  "imports": {
+    "@google/genai": "https://aistudiocdn.com/@google/genai@^1.30.0",
+    "lucide-react": "https://aistudiocdn.com/lucide-react@^0.554.0",
+    "react/": "https://aistudiocdn.com/react@^19.2.0/",
+    "react": "https://aistudiocdn.com/react@^19.2.0",
+    "react-dom/": "https://aistudiocdn.com/react-dom@^19.2.0/",
+    "jspdf": "https://esm.sh/jspdf@2.5.1"
+  }
+}
+</script>
+</head>
+  <body class="bg-slate-100 text-slate-800 h-screen w-screen overflow-hidden">
+    <div id="root" class="h-full w-full"></div>
+    <script type="module" src="/index.tsx"></script>
+  </body>
+</html>
