@@ -6,14 +6,16 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>DreamWeaver Kids Books</title>
     <script src="https://cdn.tailwindcss.com"></script>
-    <link href="https://fonts.googleapis.com/css2?family=Comic+Neue:wght@300;400;700&family=Lora:ital,wght@0,400;0,600;1,400&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Comic+Neue:wght@300;400;700&family=Lora:ital,wght@0,400;0,600;1,400&family=Noto+Sans+Bengali:wght@400;700&display=swap" rel="stylesheet">
+    <script src="https://accounts.google.com/gsi/client" async defer></script>
+    <script src="https://apis.google.com/js/api.js" async defer></script>
     <script>
       tailwind.config = {
         theme: {
           extend: {
             fontFamily: {
-              'story': ['Lora', 'serif'],
-              'comic': ['Comic Neue', 'cursive'],
+              'story': ['Lora', 'Noto Sans Bengali', 'serif'],
+              'comic': ['Comic Neue', 'Noto Sans Bengali', 'cursive'],
             },
             colors: {
               'parchment': '#fdf6e3',
@@ -23,12 +25,17 @@
             },
             animation: {
               'ken-burns': 'ken-burns 20s ease-in-out infinite alternate',
+              'page-enter': 'page-enter 0.6s cubic-bezier(0.2, 0.8, 0.2, 1)',
             },
             keyframes: {
               'ken-burns': {
                 '0%': { transform: 'scale(1) translate(0, 0)' },
                 '50%': { transform: 'scale(1.1) translate(-1%, -1%)' },
                 '100%': { transform: 'scale(1) translate(1%, 1%)' },
+              },
+              'page-enter': {
+                '0%': { opacity: '0', transform: 'translateX(20px) scale(0.98)' },
+                '100%': { opacity: '1', transform: 'translateX(0) scale(1)' }
               }
             }
           }

@@ -4,7 +4,8 @@ import { Story, StoryPage, Character } from '../types';
 import { generateImageForPage, editImageWithPrompt, generatePageAudio } from '../services/geminiService';
 import { generatePDF } from '../services/pdfService';
 import { saveStoryToDB } from '../services/db';
-import { ChevronLeft, ChevronRight, Wand2, RefreshCw, AlertCircle, Download, Volume2, VolumeX, PlayCircle, PauseCircle, Undo2, Pencil, Video, User, UserX } from 'lucide-react';
+import { isSignedIn, uploadFileToDrive } from '../services/googleDriveService';
+import { ChevronLeft, ChevronRight, Wand2, RefreshCw, AlertCircle, Download, Volume2, VolumeX, Play, Pause, Undo2, Pencil, Video, User, UserX, Cloud } from 'lucide-react';
 
 interface BookViewerProps {
   story: Story;
@@ -81,6 +82,7 @@ export const BookViewer: React.FC<BookViewerProps> = ({ story, characters, onRes
   const [isPlayingAudio, setIsPlayingAudio] = useState(false);
   const [isAutoPlay, setIsAutoPlay] = useState(true);
   const [saveStatus, setSaveStatus] = useState<'saved' | 'saving' | 'error'>('saved');
+  const [driveStatus, setDriveStatus] = useState<string | null>(null);
 
   // Character Selection State (PageIndex -> CharacterID)
   const [pageCharacterSelections, setPageCharacterSelections] = useState<Record<number, string>>({});
@@ -217,7 +219,7 @@ export const BookViewer: React.FC<BookViewerProps> = ({ story, characters, onRes
       
       source.onended = () => {
         setIsPlayingAudio(false);
-        if (isAutoPlay && !isEditingText) {
+        if (isAutoPlay && !isEditingText && !isEditing) {
            setTimeout(() => {
                setPages(currentPages => currentPages); // sync
                setCurrentPageIndex(prev => {
@@ -246,7 +248,7 @@ export const BookViewer: React.FC<BookViewerProps> = ({ story, characters, onRes
     
     let audioTimer: ReturnType<typeof setTimeout>;
 
-    if (currentPage.audioData && !isEditingText) {
+    if (currentPage.audioData && !isEditingText && !isEditing && isAutoPlay) {
         audioTimer = setTimeout(() => playPageAudio(currentPage.audioData!), 500);
     }
     
@@ -255,7 +257,7 @@ export const BookViewer: React.FC<BookViewerProps> = ({ story, characters, onRes
         stopAudio();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentPageIndex, pages[currentPageIndex].audioData]); 
+  }, [currentPageIndex, pages[currentPageIndex].audioData, isAutoPlay]); 
 
   useEffect(() => {
     return () => stopAudio();
@@ -275,19 +277,26 @@ export const BookViewer: React.FC<BookViewerProps> = ({ story, characters, onRes
       setIsEditing(false);
     } catch (error) {
       console.error("Edit failed", error);
-      setEditError("Couldn't transform the image. Gemini might be busy or the request was filtered. Try a simpler prompt.");
+      setEditError("Couldn't transform the image. Gemini might be busy or the request was filtered.");
     } finally {
       setIsProcessingEdit(false);
     }
   };
 
   const handleStartTextEdit = () => {
+    setIsAutoPlay(false);
+    stopAudio();
     const page = pages[currentPageIndex];
     setEditedText(page.text);
     setEditedVoiceover(page.voiceoverText || page.text);
     setIsEditingText(true);
-    stopAudio();
   };
+
+  const handleStartImageEdit = () => {
+      setIsAutoPlay(false);
+      stopAudio();
+      setIsEditing(!isEditing);
+  }
 
   const handleSaveTextEdit = () => {
     const page = pages[currentPageIndex];
@@ -306,6 +315,8 @@ export const BookViewer: React.FC<BookViewerProps> = ({ story, characters, onRes
   };
 
   const handleRegenerateCurrent = () => {
+     setIsAutoPlay(false);
+     stopAudio();
      const index = currentPageIndex;
      updatePage(index, { imageData: undefined, isGeneratingImage: false, hasError: false });
      setTimeout(() => triggerGeneration(index), 0);
@@ -313,11 +324,31 @@ export const BookViewer: React.FC<BookViewerProps> = ({ story, characters, onRes
 
   const handleExportPDF = async () => {
     setIsExporting(true);
+    setDriveStatus(null);
     try {
-        const success = generatePDF({ ...story, pages });
-        if (!success) throw new Error("PDF failed");
+        const blob = generatePDF({ ...story, pages });
+        if (!blob) throw new Error("PDF failed");
+        
+        // Download Local
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `${story.title.replace(/[^a-z0-9]/gi, '_')}.pdf`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+
+        // Upload to Drive if connected
+        if (isSignedIn()) {
+            setDriveStatus('Uploading to Drive...');
+            await uploadFileToDrive(blob, `${story.title}.pdf`, 'application/pdf');
+            setDriveStatus('Saved to Drive!');
+            setTimeout(() => setDriveStatus(null), 3000);
+        }
+
     } catch (e) {
-        alert("Could not generate PDF. Please try again.");
+        alert("Could not generate PDF.");
     } finally {
         setIsExporting(false);
     }
@@ -326,6 +357,7 @@ export const BookViewer: React.FC<BookViewerProps> = ({ story, characters, onRes
   const handleExportVideo = async () => {
     setIsExportingVideo(true);
     setExportProgress(0);
+    setDriveStatus(null);
     stopAudio();
 
     try {
@@ -346,7 +378,7 @@ export const BookViewer: React.FC<BookViewerProps> = ({ story, characters, onRes
       ]);
 
       const mimeType = MediaRecorder.isTypeSupported('video/mp4') ? 'video/mp4' : 'video/webm';
-      const recorder = new MediaRecorder(combinedStream, { mimeType, videoBitsPerSecond: 5000000 });
+      const recorder = new MediaRecorder(combinedStream, { mimeType, videoBitsPerSecond: 8000000 });
       const chunks: Blob[] = [];
       
       recorder.ondataavailable = (e) => {
@@ -370,7 +402,8 @@ export const BookViewer: React.FC<BookViewerProps> = ({ story, characters, onRes
         let duration = 3; 
         
         if (page.audioData) {
-           audioBuffer = await decodeAudioData(decode(page.audioData), exportAudioCtx, 44100, 1);
+           // Use 24000 Hz as the source rate to maintain correct speed
+           audioBuffer = await decodeAudioData(decode(page.audioData), exportAudioCtx, 24000, 1);
            duration = audioBuffer.duration;
         } else {
            const wordCount = (page.voiceoverText || page.text).split(' ').length;
@@ -391,18 +424,27 @@ export const BookViewer: React.FC<BookViewerProps> = ({ story, characters, onRes
            const elapsed = Date.now() - startTime;
            const progress = elapsed / durationMs;
            
+           // Draw Background
            ctx.fillStyle = '#000';
            ctx.fillRect(0, 0, canvas.width, canvas.height);
 
            if (img) {
-              const scale = 1 + (progress * 0.1);
-              const w = canvas.width * scale;
-              const h = canvas.height * scale;
+              // 16:9 Cover Logic with Zoom
+              const scaleX = canvas.width / img.width;
+              const scaleY = canvas.height / img.height;
+              const baseScale = Math.max(scaleX, scaleY);
+              
+              const zoomScale = baseScale * (1 + (progress * 0.05)); // Ken Burns Zoom
+              
+              const w = img.width * zoomScale;
+              const h = img.height * zoomScale;
               const x = (canvas.width - w) / 2;
               const y = (canvas.height - h) / 2;
+              
               ctx.drawImage(img, x, y, w, h);
            }
 
+           // Cinematic Subtitle Overlay
            const text = page.text; 
            const gradient = ctx.createLinearGradient(0, canvas.height - 300, 0, canvas.height);
            gradient.addColorStop(0, 'rgba(0,0,0,0)');
@@ -411,7 +453,7 @@ export const BookViewer: React.FC<BookViewerProps> = ({ story, characters, onRes
            ctx.fillStyle = gradient;
            ctx.fillRect(0, canvas.height - 300, canvas.width, 300);
 
-           ctx.font = 'bold 40px "Comic Neue", cursive';
+           ctx.font = 'bold 48px "Noto Sans Bengali", "Comic Neue", cursive'; 
            ctx.fillStyle = '#ffffff';
            ctx.textAlign = 'center';
            ctx.shadowColor = 'rgba(0,0,0,0.8)';
@@ -419,7 +461,7 @@ export const BookViewer: React.FC<BookViewerProps> = ({ story, characters, onRes
            ctx.shadowOffsetX = 2;
            ctx.shadowOffsetY = 2;
            
-           wrapText(ctx, text, canvas.width / 2, canvas.height - 120, canvas.width - 200, 50);
+           wrapText(ctx, text, canvas.width / 2, canvas.height - 120, canvas.width - 200, 60);
 
            await new Promise(r => setTimeout(r, 33));
         }
@@ -432,6 +474,8 @@ export const BookViewer: React.FC<BookViewerProps> = ({ story, characters, onRes
       });
 
       const blob = new Blob(chunks, { type: mimeType });
+      
+      // Download Local
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
@@ -441,9 +485,17 @@ export const BookViewer: React.FC<BookViewerProps> = ({ story, characters, onRes
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
 
+      // Upload to Drive
+      if (isSignedIn()) {
+          setDriveStatus('Uploading MP4 to Drive...');
+          await uploadFileToDrive(blob, `${story.title}.mp4`, mimeType);
+          setDriveStatus('Saved to Drive!');
+          setTimeout(() => setDriveStatus(null), 3000);
+      }
+
     } catch (e) {
        console.error("Export video failed", e);
-       alert("Failed to create video. Ensure all assets are loaded.");
+       alert("Failed to create video.");
     } finally {
       setIsExportingVideo(false);
       setExportProgress(0);
@@ -456,6 +508,18 @@ export const BookViewer: React.FC<BookViewerProps> = ({ story, characters, onRes
     } else if (pages[currentPageIndex].audioData) {
         playPageAudio(pages[currentPageIndex].audioData!);
     }
+  };
+
+  const togglePlayPause = () => {
+      if (isAutoPlay) {
+          setIsAutoPlay(false);
+          stopAudio();
+      } else {
+          setIsAutoPlay(true);
+          if (!isPlayingAudio && pages[currentPageIndex].audioData) {
+              playPageAudio(pages[currentPageIndex].audioData!);
+          }
+      }
   };
 
   const currentPage = pages[currentPageIndex];
@@ -480,13 +544,12 @@ export const BookViewer: React.FC<BookViewerProps> = ({ story, characters, onRes
         
         <div className="flex items-center gap-2 md:gap-4 overflow-x-auto">
             {saveStatus === 'saving' && <span className="text-xs text-slate-400 animate-pulse">Saving...</span>}
-            <button 
-              onClick={() => setIsAutoPlay(!isAutoPlay)}
-              className={`flex items-center gap-2 text-sm font-bold px-3 py-1 rounded-full transition-colors whitespace-nowrap ${isAutoPlay ? 'bg-green-100 text-green-700' : 'bg-slate-200 text-slate-500'}`}
-            >
-              {isAutoPlay ? <PlayCircle size={16} /> : <PauseCircle size={16} />}
-              <span className="hidden md:inline">Auto-Flip</span>
-            </button>
+            {driveStatus && (
+                <span className="text-xs font-bold text-green-600 animate-pulse flex items-center gap-1">
+                    <Cloud size={12} /> {driveStatus}
+                </span>
+            )}
+            
             <button 
                 onClick={handleExportPDF}
                 disabled={isExporting || isExportingVideo}
@@ -515,9 +578,38 @@ export const BookViewer: React.FC<BookViewerProps> = ({ story, characters, onRes
         </div>
       </div>
 
-      {/* Book View */}
-      <div className="relative w-full aspect-[16/10] md:aspect-[16/9] bg-parchment rounded-lg shadow-2xl book-shadow overflow-hidden flex flex-col md:flex-row border-r-8 border-r-slate-800/10 border-b-8 border-b-slate-800/10 transform transition-all duration-500 hover:scale-[1.01]">
-        
+      {/* Controls Bar - Top */}
+      <div className="flex items-center gap-4 bg-white px-6 py-2 rounded-full shadow-lg">
+          <button 
+             onClick={handlePrev} 
+             disabled={currentPageIndex === 0}
+             className="text-slate-400 hover:text-magic-blue disabled:opacity-30"
+          >
+             <ChevronLeft size={28} />
+          </button>
+
+          <button 
+             onClick={togglePlayPause}
+             className={`w-12 h-12 rounded-full flex items-center justify-center shadow-md transition-all ${isAutoPlay ? 'bg-amber-100 text-amber-600' : 'bg-magic-blue text-white hover:scale-105'}`}
+             title={isAutoPlay ? "Pause Auto-Play to Edit" : "Start Auto-Play"}
+          >
+             {isAutoPlay ? <Pause size={24} fill="currentColor" /> : <Play size={24} fill="currentColor" className="ml-1" />}
+          </button>
+
+          <button 
+             onClick={handleNext} 
+             disabled={currentPageIndex === pages.length - 1}
+             className="text-slate-400 hover:text-magic-blue disabled:opacity-30"
+          >
+             <ChevronRight size={28} />
+          </button>
+      </div>
+
+      {/* Book View - Animated Container */}
+      <div 
+        key={currentPageIndex} 
+        className="relative w-full aspect-[16/10] md:aspect-[16/9] bg-parchment rounded-lg shadow-2xl book-shadow overflow-hidden flex flex-col md:flex-row border-r-8 border-r-slate-800/10 border-b-8 border-b-slate-800/10 animate-page-enter"
+      >
         {/* Left: Image */}
         <div className="w-full md:w-2/3 h-1/2 md:h-full relative bg-slate-200 flex items-center justify-center overflow-hidden group">
           {currentPage.imageData ? (
@@ -532,16 +624,16 @@ export const BookViewer: React.FC<BookViewerProps> = ({ story, characters, onRes
                 
                 <div className="absolute top-4 right-4 flex flex-col gap-2 opacity-0 group-hover:opacity-100 transition-opacity duration-300 z-10">
                      <button 
-                        onClick={() => setIsEditing(!isEditing)}
+                        onClick={handleStartImageEdit}
                         className="bg-white/90 p-2 rounded-full shadow-lg hover:bg-white text-magic-purple transition-all"
-                        title="Edit Image"
+                        title="Edit Image (Pauses Story)"
                     >
                         <Wand2 size={20} />
                     </button>
                     <button 
                         onClick={handleRegenerateCurrent}
                         className="bg-white/90 p-2 rounded-full shadow-lg hover:bg-white text-slate-700 transition-all"
-                        title="Regenerate"
+                        title="Regenerate (Pauses Story)"
                     >
                         <RefreshCw size={20} />
                     </button>
@@ -681,7 +773,7 @@ export const BookViewer: React.FC<BookViewerProps> = ({ story, characters, onRes
                         <button 
                             onClick={handleStartTextEdit}
                             className="absolute top-0 right-0 p-2 text-slate-300 hover:text-magic-purple opacity-0 group-hover:opacity-100 transition-opacity duration-300 z-10"
-                            title="Edit Text & Transcript"
+                            title="Edit Text & Transcript (Pauses Story)"
                         >
                             <Pencil size={18} />
                         </button>
@@ -719,30 +811,14 @@ export const BookViewer: React.FC<BookViewerProps> = ({ story, characters, onRes
         </div>
       </div>
 
-      {/* Controls */}
-      <div className="w-full flex justify-between items-center max-w-4xl">
-        <button 
-            onClick={handlePrev} 
-            disabled={currentPageIndex === 0}
-            className="p-4 rounded-full bg-white shadow-lg disabled:opacity-30 disabled:cursor-not-allowed hover:bg-slate-50 hover:scale-110 transition-all text-magic-blue"
-        >
-            <ChevronLeft size={32} />
-        </button>
-
-        <div className="flex-1 mx-8 h-2 bg-slate-200 rounded-full overflow-hidden">
+      {/* Progress Bar */}
+      <div className="w-full max-w-4xl px-4">
+         <div className="h-2 bg-slate-200 rounded-full overflow-hidden w-full">
             <div 
                 className="h-full bg-magic-blue transition-all duration-500"
                 style={{ width: `${progress}%` }}
             ></div>
         </div>
-
-        <button 
-            onClick={handleNext} 
-            disabled={currentPageIndex === pages.length - 1}
-            className="p-4 rounded-full bg-white shadow-lg disabled:opacity-30 disabled:cursor-not-allowed hover:bg-slate-50 hover:scale-110 transition-all text-magic-blue"
-        >
-            <ChevronRight size={32} />
-        </button>
       </div>
     </div>
   );

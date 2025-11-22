@@ -27,6 +27,8 @@ export interface Story {
   pages: StoryPage[];
   theme?: StoryTheme;
   language?: string;
+  drivePdfId?: string;
+  driveMp4Id?: string;
 }
 
 export enum AppState {
@@ -35,6 +37,7 @@ export enum AppState {
   GENERATING_STORY = 'GENERATING_STORY',
   VIEWING_BOOK = 'VIEWING_BOOK',
   VIEWING_LIBRARY = 'VIEWING_LIBRARY',
+  SETTINGS = 'SETTINGS',
   ERROR = 'ERROR'
 }
 

@@ -5,7 +5,8 @@ import { generateStoryStructure } from './services/geminiService';
 import { BookViewer } from './components/BookViewer';
 import { saveStoryToDB, getAllStoriesFromDB, deleteStoryFromDB } from './services/db';
 import { generatePDF } from './services/pdfService';
-import { BookOpen, Sparkles, AlertCircle, User, Plus, Trash2, Check, Menu, Library, Home, X, FileText } from 'lucide-react';
+import { initGoogleDrive, connectToDrive, isSignedIn, uploadFileToDrive } from './services/googleDriveService';
+import { BookOpen, Sparkles, AlertCircle, User, Plus, Trash2, Check, Menu, Library, Home, X, FileText, Settings, Cloud, LogIn } from 'lucide-react';
 
 const THEMES: StoryTheme[] = ['Watercolor', 'Cartoon', 'Pixel Art', '3D Render', 'Sketch', 'Oil Painting'];
 const LANGUAGES = ['English', 'Bengali (Bangla)', 'Spanish', 'French', 'German', 'Japanese'];
@@ -56,20 +57,30 @@ const App: React.FC = () => {
   const [tempCharImage, setTempCharImage] = useState<string | null>(null);
   const [storageError, setStorageError] = useState<string | null>(null);
 
-  // Load library from localStorage on mount
+  // Settings & Drive
+  const [googleClientId, setGoogleClientId] = useState('');
+  const [isDriveReady, setIsDriveReady] = useState(false);
+  const [isDriveSignedIn, setIsDriveSignedIn] = useState(false);
+  const [settingsError, setSettingsError] = useState('');
+
+  // Load initial data
   useEffect(() => {
-    const saved = localStorage.getItem('dreamweaver_library');
-    if (saved) {
-      try {
-        const parsedLibrary = JSON.parse(saved);
-        setLibrary(parsedLibrary);
-      } catch (e) {
-        console.error("Failed to load library", e);
-      }
+    const savedLib = localStorage.getItem('dreamweaver_library');
+    if (savedLib) {
+      try { setLibrary(JSON.parse(savedLib)); } catch (e) {}
+    }
+    
+    const savedClientId = localStorage.getItem('dreamweaver_g_client_id');
+    if (savedClientId) {
+      setGoogleClientId(savedClientId);
+      initGoogleDrive(savedClientId).then(() => {
+        setIsDriveReady(true);
+        setIsDriveSignedIn(isSignedIn());
+      });
     }
   }, []);
 
-  // Save library to localStorage
+  // Save library changes
   useEffect(() => {
     try {
       localStorage.setItem('dreamweaver_library', JSON.stringify(library));
@@ -79,7 +90,7 @@ const App: React.FC = () => {
     }
   }, [library]);
 
-  // Load story library from DB when needed
+  // Load story library from DB
   const loadStoryLibrary = async () => {
       try {
           const stories = await getAllStoriesFromDB();
@@ -152,6 +163,27 @@ const App: React.FC = () => {
     );
   };
 
+  // Settings Handlers
+  const handleSaveSettings = () => {
+    if (googleClientId) {
+      localStorage.setItem('dreamweaver_g_client_id', googleClientId);
+      initGoogleDrive(googleClientId).then(() => {
+        setIsDriveReady(true);
+        setSettingsError('');
+      });
+    }
+  };
+
+  const handleConnectDrive = async () => {
+     try {
+       await connectToDrive();
+       setIsDriveSignedIn(true);
+     } catch (e) {
+       console.error(e);
+       setSettingsError("Failed to connect to Google Drive.");
+     }
+  };
+
   const startStoryGeneration = async () => {
     setState(AppState.GENERATING_STORY);
     setError(null);
@@ -160,9 +192,24 @@ const App: React.FC = () => {
       const selectedChars = library.filter(c => selectedIds.includes(c.id));
       const generatedStory = await generateStoryStructure(storyIdea, theme, language, selectedChars);
       
-      // Save to DB immediately
+      // Save to Local DB
       await saveStoryToDB(generatedStory);
       
+      // Auto Upload PDF to Drive if connected
+      if (isDriveSignedIn) {
+         setTimeout(async () => {
+            const pdfBlob = generatePDF(generatedStory);
+            if (pdfBlob) {
+               try {
+                 await uploadFileToDrive(pdfBlob, `${generatedStory.title}.pdf`, 'application/pdf');
+                 console.log("Auto-backup PDF to Drive successful");
+               } catch(e) {
+                 console.warn("Auto-backup failed", e);
+               }
+            }
+         }, 1000);
+      }
+
       setStory(generatedStory);
       setState(AppState.VIEWING_BOOK);
     } catch (err) {
@@ -186,7 +233,17 @@ const App: React.FC = () => {
 
   const handlePDFDownload = (savedStory: Story, e: React.MouseEvent) => {
       e.stopPropagation();
-      generatePDF(savedStory);
+      const blob = generatePDF(savedStory);
+      if (blob) {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `${savedStory.title.replace(/[^a-z0-9]/gi, '_')}.pdf`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      }
   };
 
   const selectedCharacters = library.filter(c => selectedIds.includes(c.id));
@@ -206,14 +263,16 @@ const App: React.FC = () => {
       {isMenuOpen && (
           <div className="fixed inset-0 z-50 flex">
               <div className="absolute inset-0 bg-black/20 backdrop-blur-sm" onClick={() => setIsMenuOpen(false)}></div>
-              <div className="relative w-64 bg-white shadow-2xl h-full flex flex-col p-6 animate-in slide-in-from-left">
+              <div className="relative w-72 bg-white shadow-2xl h-full flex flex-col p-6 animate-in slide-in-from-left">
                   <button onClick={() => setIsMenuOpen(false)} className="self-end p-2 text-slate-400 hover:text-slate-800">
                       <X size={24} />
                   </button>
                   
-                  <h2 className="text-2xl font-story font-bold text-slate-800 mb-8">DreamWeaver</h2>
+                  <h2 className="text-2xl font-story font-bold text-slate-800 mb-8 flex items-center gap-2">
+                      <Sparkles className="text-magic-purple" /> DreamWeaver
+                  </h2>
                   
-                  <nav className="flex flex-col gap-4">
+                  <nav className="flex flex-col gap-3">
                       <button 
                         onClick={() => navigateTo(AppState.IDLE)}
                         className={`flex items-center gap-3 p-3 rounded-lg font-bold transition-colors ${state === AppState.IDLE || state === AppState.CHARACTER_SETUP ? 'bg-magic-blue text-white' : 'text-slate-600 hover:bg-slate-50'}`}
@@ -226,10 +285,26 @@ const App: React.FC = () => {
                       >
                           <Library size={20} /> My Stories
                       </button>
+                      <button 
+                        onClick={() => navigateTo(AppState.SETTINGS)}
+                        className={`flex items-center gap-3 p-3 rounded-lg font-bold transition-colors ${state === AppState.SETTINGS ? 'bg-magic-blue text-white' : 'text-slate-600 hover:bg-slate-50'}`}
+                      >
+                          <Settings size={20} /> Settings
+                      </button>
                   </nav>
-                  
-                  <div className="mt-auto text-xs text-slate-400">
-                      v1.0.0
+
+                  <div className="mt-auto pt-6 border-t">
+                       <div className="flex items-center gap-2 text-sm text-slate-500 mb-2">
+                           <Cloud size={16} />
+                           <span>Backup Status:</span>
+                       </div>
+                       {isDriveSignedIn ? (
+                           <span className="text-xs font-bold text-green-600 flex items-center gap-1">
+                               <Check size={12} /> Google Drive Connected
+                           </span>
+                       ) : (
+                           <button onClick={() => navigateTo(AppState.SETTINGS)} className="text-xs text-magic-blue underline">Connect Google Drive</button>
+                       )}
                   </div>
               </div>
           </div>
@@ -296,6 +371,59 @@ const App: React.FC = () => {
               </form>
             </div>
           </div>
+        )}
+
+        {state === AppState.SETTINGS && (
+             <div className="flex flex-col items-center justify-center min-h-full p-6">
+                 <div className="max-w-md w-full bg-white p-8 rounded-2xl shadow-xl border border-slate-100">
+                     <h2 className="text-2xl font-story font-bold text-slate-800 mb-6 flex items-center gap-2">
+                         <Settings className="text-slate-400" /> Settings
+                     </h2>
+                     
+                     <div className="mb-6">
+                         <label className="block text-sm font-bold text-slate-700 mb-2">Google Drive Integration</label>
+                         <p className="text-xs text-slate-500 mb-4">
+                            To enable automatic backups to Google Drive, you must provide a Google Cloud Client ID authorized for this domain.
+                         </p>
+                         
+                         <input 
+                            type="text" 
+                            placeholder="Enter Google Client ID" 
+                            value={googleClientId}
+                            onChange={(e) => setGoogleClientId(e.target.value)}
+                            className="w-full px-4 py-2 rounded border border-slate-300 text-sm mb-2 bg-white text-slate-900"
+                         />
+                         
+                         <button 
+                            onClick={handleSaveSettings}
+                            className="w-full py-2 bg-slate-800 text-white rounded text-sm font-bold hover:bg-slate-700 mb-4"
+                         >
+                            Save Client ID
+                         </button>
+                         
+                         {isDriveReady && (
+                             <div className="border-t pt-4">
+                                 {isDriveSignedIn ? (
+                                     <div className="p-3 bg-green-50 text-green-700 rounded flex items-center gap-2 text-sm font-bold">
+                                         <Check size={16} /> Drive Connected
+                                     </div>
+                                 ) : (
+                                     <button 
+                                        onClick={handleConnectDrive}
+                                        className="w-full py-2 bg-magic-blue text-white rounded text-sm font-bold hover:bg-blue-600 flex items-center justify-center gap-2"
+                                     >
+                                         <LogIn size={16} /> Connect Google Account
+                                     </button>
+                                 )}
+                             </div>
+                         )}
+                         
+                         {settingsError && (
+                             <div className="mt-2 text-red-500 text-xs font-bold">{settingsError}</div>
+                         )}
+                     </div>
+                 </div>
+             </div>
         )}
 
         {state === AppState.VIEWING_LIBRARY && (
