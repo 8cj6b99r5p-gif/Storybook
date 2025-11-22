@@ -1,6 +1,6 @@
 
 import { GoogleGenAI, Type, Schema, Modality } from "@google/genai";
-import { Story, StoryPage, StoryTheme } from "../types";
+import { Story, StoryPage, StoryTheme, Character } from "../types";
 
 const getAI = () => new GoogleGenAI({ apiKey: process.env.API_KEY });
 
@@ -89,13 +89,23 @@ const storySchema: Schema = {
 
 // --- API Methods ---
 
-export const generateStoryStructure = async (idea: string, theme: StoryTheme, language: string): Promise<Story> => {
+export const generateStoryStructure = async (idea: string, theme: StoryTheme, language: string, characters: Character[] = []): Promise<Story> => {
   return retryWithBackoff(async () => {
     const ai = getAI();
     const model = "gemini-2.5-flash"; 
 
+    let characterContext = "";
+    if (characters.length > 0) {
+      const names = characters.map(c => c.name).join(", ");
+      characterContext = `
+      Main Characters: ${names}.
+      IMPORTANT: You MUST use these specific character names in the story. Adapt the story idea to feature these characters.
+      `;
+    }
+
     const prompt = `
       Write a children's story book based on this idea: "${idea}".
+      ${characterContext}
       
       Configuration:
       - Language: ${language} (Ensure all text and voiceoverText is in this language).
@@ -134,6 +144,8 @@ export const generateStoryStructure = async (idea: string, theme: StoryTheme, la
       }));
 
       return {
+        id: Date.now().toString() + Math.random().toString(36).substring(2),
+        createdAt: Date.now(),
         title: rawData.title,
         lesson: rawData.lesson,
         theme: theme,

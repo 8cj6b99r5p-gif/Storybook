@@ -3,7 +3,9 @@ import React, { useState, useEffect } from 'react';
 import { Story, AppState, Character, StoryTheme } from './types';
 import { generateStoryStructure } from './services/geminiService';
 import { BookViewer } from './components/BookViewer';
-import { BookOpen, Sparkles, AlertCircle, User, Plus, X, Trash2, Check } from 'lucide-react';
+import { saveStoryToDB, getAllStoriesFromDB, deleteStoryFromDB } from './services/db';
+import { generatePDF } from './services/pdfService';
+import { BookOpen, Sparkles, AlertCircle, User, Plus, Trash2, Check, Menu, Library, Home, X, FileText } from 'lucide-react';
 
 const THEMES: StoryTheme[] = ['Watercolor', 'Cartoon', 'Pixel Art', '3D Render', 'Sketch', 'Oil Painting'];
 const LANGUAGES = ['English', 'Bengali (Bangla)', 'Spanish', 'French', 'German', 'Japanese'];
@@ -16,7 +18,7 @@ const compressImage = (base64: string): Promise<string> => {
     img.onload = () => {
       const canvas = document.createElement('canvas');
       const ctx = canvas.getContext('2d');
-      const maxDim = 512; // Resize to max 512px to save space
+      const maxDim = 512; 
       let w = img.width;
       let h = img.height;
       
@@ -29,10 +31,9 @@ const compressImage = (base64: string): Promise<string> => {
       canvas.width = w;
       canvas.height = h;
       ctx?.drawImage(img, 0, 0, w, h);
-      // Return as PNG to be compatible with existing logic
       resolve(canvas.toDataURL('image/png').split(',')[1]);
     };
-    img.onerror = () => resolve(base64); // Fallback if loading fails
+    img.onerror = () => resolve(base64); 
   });
 };
 
@@ -43,6 +44,10 @@ const App: React.FC = () => {
   const [language, setLanguage] = useState('English');
   const [story, setStory] = useState<Story | null>(null);
   const [error, setError] = useState<string | null>(null);
+  
+  // Navigation & Menu
+  const [isMenuOpen, setIsMenuOpen] = useState(false);
+  const [storyLibrary, setStoryLibrary] = useState<Story[]>([]);
   
   // Character Management
   const [library, setLibrary] = useState<Character[]>([]);
@@ -64,16 +69,37 @@ const App: React.FC = () => {
     }
   }, []);
 
-  // Save library to localStorage whenever it changes
+  // Save library to localStorage
   useEffect(() => {
     try {
       localStorage.setItem('dreamweaver_library', JSON.stringify(library));
       setStorageError(null);
     } catch (e) {
-      console.error("Failed to save library (likely quota exceeded)", e);
-      setStorageError("Storage full! Delete some characters to save new ones.");
+      setStorageError("Storage full! Delete some characters.");
     }
   }, [library]);
+
+  // Load story library from DB when needed
+  const loadStoryLibrary = async () => {
+      try {
+          const stories = await getAllStoriesFromDB();
+          setStoryLibrary(stories);
+      } catch (e) {
+          console.error("Failed to load stories", e);
+      }
+  };
+
+  const navigateTo = (newState: AppState) => {
+      setState(newState);
+      setIsMenuOpen(false);
+      if (newState === AppState.VIEWING_LIBRARY) {
+          loadStoryLibrary();
+      }
+      if (newState === AppState.IDLE) {
+          setStory(null);
+          setStoryIdea('');
+      }
+  };
 
   const handleIdeaSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -88,11 +114,9 @@ const App: React.FC = () => {
       reader.onloadend = async () => {
         const rawBase64 = (reader.result as string).split(',')[1];
         try {
-           // Compress before setting state to keep preview consistent with storage
            const compressed = await compressImage(rawBase64);
            setTempCharImage(compressed);
         } catch (err) {
-           console.error("Compression failed", err);
            setTempCharImage(rawBase64);
         }
       };
@@ -107,19 +131,16 @@ const App: React.FC = () => {
         name: charUploadName,
         imageData: tempCharImage
       };
-      
       setLibrary(prev => [...prev, newChar]);
-      // Auto-select the newly added character
       setSelectedIds(prev => [...prev, newChar.id]);
-      
       setTempCharImage(null);
       setCharUploadName('');
     }
   };
 
   const deleteFromLibrary = (id: string, e: React.MouseEvent) => {
-    e.stopPropagation(); // Prevent toggling selection
-    if (window.confirm("Are you sure you want to delete this character?")) {
+    e.stopPropagation(); 
+    if (window.confirm("Delete this character?")) {
         setLibrary(prev => prev.filter(c => c.id !== id));
         setSelectedIds(prev => prev.filter(cid => cid !== id));
     }
@@ -127,9 +148,7 @@ const App: React.FC = () => {
 
   const toggleSelection = (id: string) => {
     setSelectedIds(prev => 
-        prev.includes(id) 
-            ? prev.filter(cid => cid !== id) 
-            : [...prev, id]
+        prev.includes(id) ? prev.filter(cid => cid !== id) : [...prev, id]
     );
   };
 
@@ -138,7 +157,12 @@ const App: React.FC = () => {
     setError(null);
 
     try {
-      const generatedStory = await generateStoryStructure(storyIdea, theme, language);
+      const selectedChars = library.filter(c => selectedIds.includes(c.id));
+      const generatedStory = await generateStoryStructure(storyIdea, theme, language, selectedChars);
+      
+      // Save to DB immediately
+      await saveStoryToDB(generatedStory);
+      
       setStory(generatedStory);
       setState(AppState.VIEWING_BOOK);
     } catch (err) {
@@ -147,27 +171,75 @@ const App: React.FC = () => {
     }
   };
 
-  const handleReset = () => {
-    setState(AppState.IDLE);
-    setStory(null);
-    setStoryIdea('');
-    setError(null);
-    setTempCharImage(null);
-    setSelectedIds([]);
+  const handleDeleteStory = async (id: string, e: React.MouseEvent) => {
+      e.stopPropagation();
+      if(window.confirm("Delete this story forever?")) {
+          await deleteStoryFromDB(id);
+          loadStoryLibrary();
+      }
   };
 
-  // Get the actual Character objects for the selected IDs
+  const handleOpenStory = (savedStory: Story) => {
+      setStory(savedStory);
+      setState(AppState.VIEWING_BOOK);
+  };
+
+  const handlePDFDownload = (savedStory: Story, e: React.MouseEvent) => {
+      e.stopPropagation();
+      generatePDF(savedStory);
+  };
+
   const selectedCharacters = library.filter(c => selectedIds.includes(c.id));
 
   return (
-    <div className="min-h-screen bg-slate-100 flex flex-col font-sans selection:bg-magic-blue/20">
+    <div className="min-h-screen bg-slate-100 flex flex-col font-sans">
       
+      {/* Navigation Menu Button */}
+      <button 
+        onClick={() => setIsMenuOpen(true)}
+        className="fixed top-4 left-4 z-50 p-2 bg-white/80 backdrop-blur rounded-full shadow-md hover:bg-white transition-all text-slate-700"
+      >
+        <Menu size={24} />
+      </button>
+
+      {/* Sidebar / Drawer */}
+      {isMenuOpen && (
+          <div className="fixed inset-0 z-50 flex">
+              <div className="absolute inset-0 bg-black/20 backdrop-blur-sm" onClick={() => setIsMenuOpen(false)}></div>
+              <div className="relative w-64 bg-white shadow-2xl h-full flex flex-col p-6 animate-in slide-in-from-left">
+                  <button onClick={() => setIsMenuOpen(false)} className="self-end p-2 text-slate-400 hover:text-slate-800">
+                      <X size={24} />
+                  </button>
+                  
+                  <h2 className="text-2xl font-story font-bold text-slate-800 mb-8">DreamWeaver</h2>
+                  
+                  <nav className="flex flex-col gap-4">
+                      <button 
+                        onClick={() => navigateTo(AppState.IDLE)}
+                        className={`flex items-center gap-3 p-3 rounded-lg font-bold transition-colors ${state === AppState.IDLE || state === AppState.CHARACTER_SETUP ? 'bg-magic-blue text-white' : 'text-slate-600 hover:bg-slate-50'}`}
+                      >
+                          <Home size={20} /> Create New
+                      </button>
+                      <button 
+                        onClick={() => navigateTo(AppState.VIEWING_LIBRARY)}
+                        className={`flex items-center gap-3 p-3 rounded-lg font-bold transition-colors ${state === AppState.VIEWING_LIBRARY ? 'bg-magic-blue text-white' : 'text-slate-600 hover:bg-slate-50'}`}
+                      >
+                          <Library size={20} /> My Stories
+                      </button>
+                  </nav>
+                  
+                  <div className="mt-auto text-xs text-slate-400">
+                      v1.0.0
+                  </div>
+              </div>
+          </div>
+      )}
+
       <main className="flex-1 relative overflow-y-auto">
         
         {state === AppState.IDLE && (
           <div className="flex flex-col items-center justify-center min-h-full p-6">
             <div className="max-w-2xl w-full space-y-8 text-center">
-              
               <div className="space-y-4">
                 <div className="inline-block p-4 bg-white rounded-full shadow-xl mb-4 animate-bounce">
                    <BookOpen size={48} className="text-magic-blue" />
@@ -177,7 +249,7 @@ const App: React.FC = () => {
                   <span className="text-magic-purple"> Kids</span>
                 </h1>
                 <p className="text-lg md:text-xl text-slate-600 font-comic max-w-lg mx-auto">
-                  Create magical stories with Gemini. Choose your theme and language!
+                  Create magical stories with AI. Choose your theme and language!
                 </p>
               </div>
 
@@ -190,7 +262,7 @@ const App: React.FC = () => {
                           value={storyIdea}
                           onChange={(e) => setStoryIdea(e.target.value)}
                           placeholder="e.g., A lonely cloud looking for a friend..."
-                          className="w-full px-6 py-4 text-lg outline-none font-comic text-slate-800 placeholder:text-slate-400"
+                          className="w-full px-6 py-4 text-lg outline-none font-comic placeholder:text-slate-400 bg-white text-slate-900"
                           autoFocus
                       />
                   </div>
@@ -200,14 +272,14 @@ const App: React.FC = () => {
                    <select 
                      value={theme}
                      onChange={(e) => setTheme(e.target.value as StoryTheme)}
-                     className="flex-1 p-3 rounded-lg border border-slate-300 bg-white text-slate-700 font-comic focus:border-magic-purple outline-none"
+                     className="flex-1 p-3 rounded-lg border border-slate-300 bg-white text-slate-900 font-comic focus:border-magic-purple outline-none"
                    >
                       {THEMES.map(t => <option key={t} value={t}>{t}</option>)}
                    </select>
                    <select 
                      value={language}
                      onChange={(e) => setLanguage(e.target.value)}
-                     className="flex-1 p-3 rounded-lg border border-slate-300 bg-white text-slate-700 font-comic focus:border-magic-purple outline-none"
+                     className="flex-1 p-3 rounded-lg border border-slate-300 bg-white text-slate-900 font-comic focus:border-magic-purple outline-none"
                    >
                       {LANGUAGES.map(l => <option key={l} value={l}>{l}</option>)}
                    </select>
@@ -226,12 +298,78 @@ const App: React.FC = () => {
           </div>
         )}
 
+        {state === AppState.VIEWING_LIBRARY && (
+            <div className="p-8 max-w-6xl mx-auto min-h-full">
+                <h2 className="text-3xl font-story font-bold text-slate-800 mb-8 pl-12">My Story Library</h2>
+                
+                {storyLibrary.length === 0 ? (
+                    <div className="text-center py-20 bg-white rounded-xl shadow-sm border border-slate-100">
+                        <BookOpen size={48} className="text-slate-300 mx-auto mb-4" />
+                        <p className="text-slate-500 font-comic">No stories yet. Time to create magic!</p>
+                        <button onClick={() => navigateTo(AppState.IDLE)} className="mt-4 text-magic-blue font-bold hover:underline">
+                            Create New Story
+                        </button>
+                    </div>
+                ) : (
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                        {storyLibrary.map(savedStory => (
+                            <div key={savedStory.id} className="bg-white rounded-xl shadow-md hover:shadow-xl transition-shadow border border-slate-100 overflow-hidden flex flex-col">
+                                {/* Preview Image (use first page image or placeholder) */}
+                                <div className="h-48 bg-slate-200 relative">
+                                    {savedStory.pages[0]?.imageData ? (
+                                        <img src={`data:image/png;base64,${savedStory.pages[0].imageData}`} className="w-full h-full object-cover" />
+                                    ) : (
+                                        <div className="flex items-center justify-center h-full text-slate-400">
+                                            <Sparkles />
+                                        </div>
+                                    )}
+                                    <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/60 to-transparent p-4">
+                                        <span className="text-white text-xs font-bold px-2 py-1 bg-white/20 backdrop-blur rounded-full">
+                                            {savedStory.theme}
+                                        </span>
+                                    </div>
+                                </div>
+                                
+                                <div className="p-4 flex-1 flex flex-col">
+                                    <h3 className="font-story font-bold text-lg text-slate-800 mb-1 line-clamp-1">{savedStory.title}</h3>
+                                    <p className="text-xs text-slate-500 mb-4">{new Date(savedStory.createdAt).toLocaleDateString()} • {savedStory.language}</p>
+                                    
+                                    <div className="mt-auto flex gap-2">
+                                        <button 
+                                            onClick={() => handleOpenStory(savedStory)}
+                                            className="flex-1 py-2 bg-magic-blue text-white rounded-lg font-bold text-sm hover:bg-blue-600"
+                                        >
+                                            Read
+                                        </button>
+                                        <button 
+                                            onClick={(e) => handlePDFDownload(savedStory, e)}
+                                            className="p-2 text-magic-purple bg-purple-50 hover:bg-purple-100 rounded-lg"
+                                            title="Download PDF"
+                                        >
+                                            <FileText size={20} />
+                                        </button>
+                                        <button 
+                                            onClick={(e) => handleDeleteStory(savedStory.id, e)}
+                                            className="p-2 text-red-400 hover:bg-red-50 hover:text-red-600 rounded-lg"
+                                            title="Delete"
+                                        >
+                                            <Trash2 size={20} />
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                )}
+            </div>
+        )}
+
         {state === AppState.CHARACTER_SETUP && (
-            <div className="flex flex-col items-center justify-center min-h-full p-6">
+            <div className="flex flex-col items-center justify-center min-h-full p-6 pt-16">
                 <div className="max-w-5xl w-full bg-white rounded-2xl shadow-xl p-8 border border-slate-100">
                     <div className="text-center mb-8">
                          <h2 className="text-3xl font-story font-bold text-slate-800 mb-2">Cast Your Characters</h2>
-                         <p className="text-slate-500 font-comic">Select characters from your library or add new ones for this story.</p>
+                         <p className="text-slate-500 font-comic">Select characters from your library or add new ones.</p>
                     </div>
 
                     <div className="grid grid-cols-1 md:grid-cols-3 gap-8 h-[500px]">
@@ -252,7 +390,7 @@ const App: React.FC = () => {
                                 placeholder="Name (e.g. 'Bob')" 
                                 value={charUploadName}
                                 onChange={(e) => setCharUploadName(e.target.value)}
-                                className="w-full mb-4 px-4 py-2 rounded border border-slate-300 focus:outline-none focus:border-magic-blue"
+                                className="w-full mb-4 px-4 py-2 rounded border border-slate-300 focus:outline-none focus:border-magic-blue bg-white text-slate-900"
                              />
                              <button 
                                 onClick={addToLibrary}
@@ -298,21 +436,17 @@ const App: React.FC = () => {
                                                             : 'border-slate-200 hover:border-slate-300 bg-white'
                                                     }`}
                                                 >
-                                                    {/* Selection Indicator */}
                                                     <div className={`absolute top-2 left-2 z-10 w-6 h-6 rounded-full flex items-center justify-center transition-colors ${
                                                         isSelected ? 'bg-magic-blue text-white' : 'bg-white/80 text-transparent border border-slate-300'
                                                     }`}>
                                                         <Check size={14} strokeWidth={3} />
                                                     </div>
-
-                                                    {/* Delete Button */}
                                                     <button 
                                                         onClick={(e) => deleteFromLibrary(char.id, e)}
                                                         className="absolute top-2 right-2 z-10 p-1.5 bg-white/90 text-slate-400 hover:text-red-500 rounded-full opacity-0 group-hover:opacity-100 transition-opacity hover:bg-white shadow-sm"
                                                     >
                                                         <Trash2 size={14} />
                                                     </button>
-
                                                     <div className="aspect-square bg-slate-200 relative">
                                                         <img src={`data:image/png;base64,${char.imageData}`} className="w-full h-full object-cover" />
                                                     </div>
@@ -331,6 +465,12 @@ const App: React.FC = () => {
                     </div>
 
                     <div className="flex gap-4 justify-center mt-8 border-t pt-6">
+                         <button 
+                            onClick={() => navigateTo(AppState.IDLE)}
+                            className="px-6 py-3 text-slate-500 hover:text-slate-800 font-bold"
+                        >
+                            Cancel
+                        </button>
                         <button 
                             onClick={startStoryGeneration}
                             className="px-8 py-3 bg-magic-purple text-white rounded-full font-bold shadow-lg hover:bg-purple-600 flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed transform hover:scale-105 transition-all"
@@ -365,7 +505,7 @@ const App: React.FC = () => {
              <h3 className="text-xl font-bold text-slate-800 mb-2">Oh no!</h3>
              <p className="text-slate-600 mb-8 max-w-md">{error}</p>
              <button 
-                onClick={handleReset}
+                onClick={() => navigateTo(AppState.IDLE)}
                 className="px-6 py-3 bg-slate-900 text-white rounded-lg font-bold hover:bg-slate-800"
              >
                 Try Again
@@ -374,7 +514,7 @@ const App: React.FC = () => {
         )}
 
         {state === AppState.VIEWING_BOOK && story && (
-           <BookViewer story={story} characters={selectedCharacters} onReset={handleReset} />
+           <BookViewer story={story} characters={selectedCharacters} onReset={() => navigateTo(AppState.VIEWING_LIBRARY)} />
         )}
       </main>
       

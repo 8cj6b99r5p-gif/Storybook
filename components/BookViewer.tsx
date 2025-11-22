@@ -2,8 +2,9 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Story, StoryPage, Character } from '../types';
 import { generateImageForPage, editImageWithPrompt, generatePageAudio } from '../services/geminiService';
-import { ChevronLeft, ChevronRight, Wand2, RefreshCw, AlertCircle, Download, Volume2, VolumeX, PlayCircle, PauseCircle, Undo2 } from 'lucide-react';
-import { jsPDF } from "jspdf";
+import { generatePDF } from '../services/pdfService';
+import { saveStoryToDB } from '../services/db';
+import { ChevronLeft, ChevronRight, Wand2, RefreshCw, AlertCircle, Download, Volume2, VolumeX, PlayCircle, PauseCircle, Undo2, Pencil, Video, User, UserX } from 'lucide-react';
 
 interface BookViewerProps {
   story: Story;
@@ -41,6 +42,32 @@ async function decodeAudioData(
   return buffer;
 }
 
+// Helper to wrap text on canvas
+function wrapText(ctx: CanvasRenderingContext2D, text: string, x: number, y: number, maxWidth: number, lineHeight: number) {
+    const words = text.split(' ');
+    let line = '';
+    const lines = [];
+
+    for(let n = 0; n < words.length; n++) {
+      const testLine = line + words[n] + ' ';
+      const metrics = ctx.measureText(testLine);
+      const testWidth = metrics.width;
+      if (testWidth > maxWidth && n > 0) {
+        lines.push(line);
+        line = words[n] + ' ';
+      } else {
+        line = testLine;
+      }
+    }
+    lines.push(line);
+
+    // Draw lines centered
+    for (let k = 0; k < lines.length; k++) {
+        ctx.fillText(lines[k], x, y + (k * lineHeight));
+    }
+    return lines.length * lineHeight;
+}
+
 export const BookViewer: React.FC<BookViewerProps> = ({ story, characters, onReset }) => {
   const [currentPageIndex, setCurrentPageIndex] = useState(0);
   const [pages, setPages] = useState<StoryPage[]>(story.pages);
@@ -49,16 +76,54 @@ export const BookViewer: React.FC<BookViewerProps> = ({ story, characters, onRes
   const [isProcessingEdit, setIsProcessingEdit] = useState(false);
   const [editError, setEditError] = useState<string | null>(null);
   const [isExporting, setIsExporting] = useState(false);
+  const [isExportingVideo, setIsExportingVideo] = useState(false);
+  const [exportProgress, setExportProgress] = useState(0);
   const [isPlayingAudio, setIsPlayingAudio] = useState(false);
   const [isAutoPlay, setIsAutoPlay] = useState(true);
+  const [saveStatus, setSaveStatus] = useState<'saved' | 'saving' | 'error'>('saved');
+
+  // Character Selection State (PageIndex -> CharacterID)
+  const [pageCharacterSelections, setPageCharacterSelections] = useState<Record<number, string>>({});
+
+  // Text Editing State
+  const [isEditingText, setIsEditingText] = useState(false);
+  const [editedText, setEditedText] = useState('');
+  const [editedVoiceover, setEditedVoiceover] = useState('');
   
   // Audio refs
   const audioContextRef = useRef<AudioContext | null>(null);
   const audioSourceRef = useRef<AudioBufferSourceNode | null>(null);
 
+  // Save changes to DB
+  const persistChanges = async (updatedPages: StoryPage[]) => {
+    setSaveStatus('saving');
+    try {
+        await saveStoryToDB({ ...story, pages: updatedPages });
+        setSaveStatus('saved');
+    } catch (e) {
+        console.error("Failed to auto-save story", e);
+        setSaveStatus('error');
+    }
+  };
+
   // Function to safely update a page
   const updatePage = (index: number, updates: Partial<StoryPage>) => {
-    setPages(prev => prev.map((p, i) => i === index ? { ...p, ...updates } : p));
+    setPages(prev => {
+        const newPages = prev.map((p, i) => i === index ? { ...p, ...updates } : p);
+        persistChanges(newPages);
+        return newPages;
+    });
+  };
+
+  const getSelectedCharacterForPage = (index: number) => {
+    const selectedId = pageCharacterSelections[index];
+    if (selectedId === 'none') return undefined;
+
+    if (selectedId) {
+        return characters.find(c => c.id === selectedId);
+    }
+    // Default to first character if available
+    return characters.length > 0 ? characters[0] : undefined;
   };
 
   const triggerGeneration = (index: number) => {
@@ -68,8 +133,8 @@ export const BookViewer: React.FC<BookViewerProps> = ({ story, characters, onRes
     if (!page.imageData && !page.isGeneratingImage) {
       updatePage(index, { isGeneratingImage: true, hasError: false });
       
-      // Use the first uploaded character as the reference (or handle multiple later)
-      const characterRef = characters.length > 0 ? characters[0].imageData : undefined;
+      const selectedChar = getSelectedCharacterForPage(index);
+      const characterRef = selectedChar?.imageData;
 
       generateImageForPage(page.imagePrompt, characterRef, story.theme)
         .then(base64 => {
@@ -82,7 +147,6 @@ export const BookViewer: React.FC<BookViewerProps> = ({ story, characters, onRes
     }
 
     // Audio Generation
-    // Use voiceoverText if available, fallback to text
     const textToSpeak = page.voiceoverText || page.text;
     if (!page.audioData && !page.isGeneratingAudio) {
        updatePage(index, { isGeneratingAudio: true });
@@ -110,13 +174,22 @@ export const BookViewer: React.FC<BookViewerProps> = ({ story, characters, onRes
   const handleNext = () => {
     if (currentPageIndex < pages.length - 1) {
       setCurrentPageIndex(prev => prev + 1);
+      setIsEditingText(false);
     }
   };
 
   const handlePrev = () => {
     if (currentPageIndex > 0) {
       setCurrentPageIndex(prev => prev - 1);
+      setIsEditingText(false);
     }
+  };
+
+  const handleCharacterSelect = (charId: string) => {
+    setPageCharacterSelections(prev => ({
+        ...prev,
+        [currentPageIndex]: charId
+    }));
   };
 
   const playPageAudio = async (base64Audio: string) => {
@@ -144,14 +217,14 @@ export const BookViewer: React.FC<BookViewerProps> = ({ story, characters, onRes
       
       source.onended = () => {
         setIsPlayingAudio(false);
-        if (isAutoPlay) {
+        if (isAutoPlay && !isEditingText) {
            setTimeout(() => {
                setPages(currentPages => currentPages); // sync
                setCurrentPageIndex(prev => {
                  if (prev < pages.length - 1) return prev + 1;
                  return prev;
                });
-           }, 800); // Slightly longer pause for dramatic effect
+           }, 800);
         }
       };
       
@@ -173,7 +246,7 @@ export const BookViewer: React.FC<BookViewerProps> = ({ story, characters, onRes
     
     let audioTimer: ReturnType<typeof setTimeout>;
 
-    if (currentPage.audioData) {
+    if (currentPage.audioData && !isEditingText) {
         audioTimer = setTimeout(() => playPageAudio(currentPage.audioData!), 500);
     }
     
@@ -208,6 +281,30 @@ export const BookViewer: React.FC<BookViewerProps> = ({ story, characters, onRes
     }
   };
 
+  const handleStartTextEdit = () => {
+    const page = pages[currentPageIndex];
+    setEditedText(page.text);
+    setEditedVoiceover(page.voiceoverText || page.text);
+    setIsEditingText(true);
+    stopAudio();
+  };
+
+  const handleSaveTextEdit = () => {
+    const page = pages[currentPageIndex];
+    const updates: Partial<StoryPage> = {
+        text: editedText,
+        voiceoverText: editedVoiceover
+    };
+
+    if (editedVoiceover !== (page.voiceoverText || page.text)) {
+        updates.audioData = undefined;
+        updates.isGeneratingAudio = false;
+    }
+
+    updatePage(currentPageIndex, updates);
+    setIsEditingText(false);
+  };
+
   const handleRegenerateCurrent = () => {
      const index = currentPageIndex;
      updatePage(index, { imageData: undefined, isGeneratingImage: false, hasError: false });
@@ -217,52 +314,139 @@ export const BookViewer: React.FC<BookViewerProps> = ({ story, characters, onRes
   const handleExportPDF = async () => {
     setIsExporting(true);
     try {
-        const doc = new jsPDF();
-        const pageWidth = 210;
-        const margin = 20;
-        const imageWidth = pageWidth - (margin * 2);
-        const imageHeight = imageWidth * (9/16); 
-        
-        // Title Page
-        doc.setFont("times", "bold");
-        doc.setFontSize(24);
-        doc.text(story.title, pageWidth / 2, 50, { align: "center" });
-        doc.setFontSize(12);
-        doc.text(`Theme: ${story.theme}`, pageWidth / 2, 65, { align: "center" });
-        doc.setFontSize(14);
-        doc.text(`Lesson: ${story.lesson}`, pageWidth / 2, 80, { align: "center" });
-
-        // Pages
-        for (let i = 0; i < pages.length; i++) {
-            doc.addPage();
-            const page = pages[i];
-            
-            if (page.imageData) {
-                const imgData = `data:image/png;base64,${page.imageData}`;
-                try {
-                   doc.addImage(imgData, 'PNG', margin, margin, imageWidth, imageHeight);
-                } catch (e) { /* ignore */ }
-            }
-
-            const textY = page.imageData ? margin + imageHeight + 20 : margin;
-            doc.setFontSize(12);
-            doc.setFont("times", "normal");
-            
-            // Use full voiceover text for PDF if user wants full story, or short text? 
-            // Usually stories are better read fully. Let's use voiceoverText if available.
-            const textToPrint = page.voiceoverText || page.text;
-            const splitText = doc.splitTextToSize(textToPrint, imageWidth);
-            doc.text(splitText, margin, textY);
-            
-            doc.setFontSize(10);
-            doc.text(`- ${i + 1} -`, pageWidth / 2, 280, { align: "center" });
-        }
-
-        doc.save("DreamWeaverStory.pdf");
+        const success = generatePDF({ ...story, pages });
+        if (!success) throw new Error("PDF failed");
     } catch (e) {
-        alert("Could not generate PDF. Please try again when all images are loaded.");
+        alert("Could not generate PDF. Please try again.");
     } finally {
         setIsExporting(false);
+    }
+  };
+
+  const handleExportVideo = async () => {
+    setIsExportingVideo(true);
+    setExportProgress(0);
+    stopAudio();
+
+    try {
+      const canvas = document.createElement('canvas');
+      canvas.width = 1920;
+      canvas.height = 1080;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) throw new Error("Could not create canvas context");
+
+      const exportAudioCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 44100 });
+      const dest = exportAudioCtx.createMediaStreamDestination();
+      
+      const canvasStream = canvas.captureStream(30); 
+      
+      const combinedStream = new MediaStream([
+        ...canvasStream.getVideoTracks(),
+        ...dest.stream.getAudioTracks()
+      ]);
+
+      const mimeType = MediaRecorder.isTypeSupported('video/mp4') ? 'video/mp4' : 'video/webm';
+      const recorder = new MediaRecorder(combinedStream, { mimeType, videoBitsPerSecond: 5000000 });
+      const chunks: Blob[] = [];
+      
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) chunks.push(e.data);
+      };
+      
+      recorder.start();
+
+      for (let i = 0; i < pages.length; i++) {
+        const page = pages[i];
+        setExportProgress(Math.round(((i) / pages.length) * 100));
+
+        let img: HTMLImageElement | null = null;
+        if (page.imageData) {
+           img = new Image();
+           img.src = `data:image/png;base64,${page.imageData}`;
+           await new Promise((r) => img!.onload = r);
+        }
+
+        let audioBuffer: AudioBuffer | null = null;
+        let duration = 3; 
+        
+        if (page.audioData) {
+           audioBuffer = await decodeAudioData(decode(page.audioData), exportAudioCtx, 44100, 1);
+           duration = audioBuffer.duration;
+        } else {
+           const wordCount = (page.voiceoverText || page.text).split(' ').length;
+           duration = (wordCount * 0.3) + 2;
+        }
+
+        if (audioBuffer) {
+           const source = exportAudioCtx.createBufferSource();
+           source.buffer = audioBuffer;
+           source.connect(dest);
+           source.start(exportAudioCtx.currentTime);
+        }
+
+        const startTime = Date.now();
+        const durationMs = duration * 1000;
+        
+        while (Date.now() - startTime < durationMs) {
+           const elapsed = Date.now() - startTime;
+           const progress = elapsed / durationMs;
+           
+           ctx.fillStyle = '#000';
+           ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+           if (img) {
+              const scale = 1 + (progress * 0.1);
+              const w = canvas.width * scale;
+              const h = canvas.height * scale;
+              const x = (canvas.width - w) / 2;
+              const y = (canvas.height - h) / 2;
+              ctx.drawImage(img, x, y, w, h);
+           }
+
+           const text = page.text; 
+           const gradient = ctx.createLinearGradient(0, canvas.height - 300, 0, canvas.height);
+           gradient.addColorStop(0, 'rgba(0,0,0,0)');
+           gradient.addColorStop(0.4, 'rgba(0,0,0,0.7)');
+           gradient.addColorStop(1, 'rgba(0,0,0,0.9)');
+           ctx.fillStyle = gradient;
+           ctx.fillRect(0, canvas.height - 300, canvas.width, 300);
+
+           ctx.font = 'bold 40px "Comic Neue", cursive';
+           ctx.fillStyle = '#ffffff';
+           ctx.textAlign = 'center';
+           ctx.shadowColor = 'rgba(0,0,0,0.8)';
+           ctx.shadowBlur = 10;
+           ctx.shadowOffsetX = 2;
+           ctx.shadowOffsetY = 2;
+           
+           wrapText(ctx, text, canvas.width / 2, canvas.height - 120, canvas.width - 200, 50);
+
+           await new Promise(r => setTimeout(r, 33));
+        }
+      }
+
+      recorder.stop();
+      
+      await new Promise<void>(resolve => {
+          recorder.onstop = () => resolve();
+      });
+
+      const blob = new Blob(chunks, { type: mimeType });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${story.title.replace(/[^a-z0-9]/gi, '_')}.mp4`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+
+    } catch (e) {
+       console.error("Export video failed", e);
+       alert("Failed to create video. Ensure all assets are loaded.");
+    } finally {
+      setIsExportingVideo(false);
+      setExportProgress(0);
     }
   };
 
@@ -277,32 +461,56 @@ export const BookViewer: React.FC<BookViewerProps> = ({ story, characters, onRes
   const currentPage = pages[currentPageIndex];
   const progress = ((currentPageIndex + 1) / pages.length) * 100;
 
+  const currentSelectedCharId = pageCharacterSelections[currentPageIndex] !== undefined 
+    ? pageCharacterSelections[currentPageIndex] 
+    : (characters.length > 0 ? characters[0].id : 'none');
+
   return (
     <div className="flex flex-col items-center justify-center min-h-full w-full max-w-6xl mx-auto p-4 gap-6">
       
       {/* Header */}
-      <div className="w-full flex justify-between items-center text-slate-600">
-        <button onClick={onReset} className="hover:text-magic-blue transition-colors flex items-center gap-2 font-comic font-bold">
-          &larr; New
+      <div className="w-full flex flex-wrap justify-between items-center text-slate-600 gap-4">
+        <button onClick={onReset} className="hover:text-magic-blue transition-colors flex items-center gap-2 font-comic font-bold bg-white px-3 py-1 rounded-full shadow-sm">
+          &larr; Back
         </button>
-        <h1 className="text-xl font-story font-bold truncate max-w-md text-center hidden md:block" title={story.title}>
+        
+        <h1 className="text-xl font-story font-bold truncate max-w-xs md:max-w-md text-center" title={story.title}>
           {story.title}
         </h1>
-        <div className="flex items-center gap-2 md:gap-4">
+        
+        <div className="flex items-center gap-2 md:gap-4 overflow-x-auto">
+            {saveStatus === 'saving' && <span className="text-xs text-slate-400 animate-pulse">Saving...</span>}
             <button 
               onClick={() => setIsAutoPlay(!isAutoPlay)}
-              className={`flex items-center gap-2 text-sm font-bold px-3 py-1 rounded-full transition-colors ${isAutoPlay ? 'bg-green-100 text-green-700' : 'bg-slate-200 text-slate-500'}`}
+              className={`flex items-center gap-2 text-sm font-bold px-3 py-1 rounded-full transition-colors whitespace-nowrap ${isAutoPlay ? 'bg-green-100 text-green-700' : 'bg-slate-200 text-slate-500'}`}
             >
               {isAutoPlay ? <PlayCircle size={16} /> : <PauseCircle size={16} />}
               <span className="hidden md:inline">Auto-Flip</span>
             </button>
             <button 
                 onClick={handleExportPDF}
-                disabled={isExporting}
-                className="flex items-center gap-2 text-sm font-bold text-magic-purple hover:bg-purple-50 px-3 py-1 rounded-full transition-colors"
+                disabled={isExporting || isExportingVideo}
+                className="flex items-center gap-2 text-sm font-bold text-magic-purple hover:bg-purple-50 px-3 py-1 rounded-full transition-colors disabled:opacity-50 whitespace-nowrap"
             >
                 {isExporting ? <RefreshCw className="animate-spin" size={16} /> : <Download size={16} />}
                 <span className="hidden md:inline">PDF</span>
+            </button>
+            <button 
+                onClick={handleExportVideo}
+                disabled={isExporting || isExportingVideo}
+                className="flex items-center gap-2 text-sm font-bold text-red-500 hover:bg-red-50 px-3 py-1 rounded-full transition-colors disabled:opacity-50 whitespace-nowrap"
+            >
+                {isExportingVideo ? (
+                  <div className="flex items-center gap-2">
+                    <RefreshCw className="animate-spin" size={16} />
+                    <span>{exportProgress}%</span>
+                  </div>
+                ) : (
+                  <>
+                    <Video size={16} />
+                    <span className="hidden md:inline">MP4</span>
+                  </>
+                )}
             </button>
         </div>
       </div>
@@ -347,8 +555,8 @@ export const BookViewer: React.FC<BookViewerProps> = ({ story, characters, onRes
                                 type="text" 
                                 value={editPrompt}
                                 onChange={(e) => setEditPrompt(e.target.value)}
-                                placeholder="What should change? (e.g., 'Make the sky pink')"
-                                className="flex-1 px-4 py-2 rounded border border-slate-300 focus:outline-none focus:ring-2 focus:ring-magic-purple font-comic text-sm"
+                                placeholder="e.g., 'Make the sky pink'"
+                                className="flex-1 px-4 py-2 rounded border border-slate-300 focus:outline-none focus:ring-2 focus:ring-magic-purple font-comic text-sm bg-white text-slate-900"
                                 autoFocus
                             />
                             <button 
@@ -398,34 +606,109 @@ export const BookViewer: React.FC<BookViewerProps> = ({ story, characters, onRes
               )}
             </div>
           )}
+
+          {/* Character Selector Overlay */}
+          {characters.length > 0 && (
+            <div className="absolute bottom-4 left-1/2 transform -translate-x-1/2 z-10 opacity-0 group-hover:opacity-100 transition-opacity duration-300 flex flex-col items-center gap-2">
+                <div className="bg-white/90 backdrop-blur-sm rounded-full shadow-lg p-1.5 flex items-center gap-2 border border-slate-200">
+                    {/* None Option */}
+                    <button
+                        onClick={() => handleCharacterSelect('none')}
+                        className={`relative w-8 h-8 rounded-full flex items-center justify-center border-2 transition-all ${currentSelectedCharId === 'none' ? 'border-slate-400 bg-slate-100 text-slate-500' : 'border-transparent text-slate-400 hover:bg-slate-100'}`}
+                        title="No Character"
+                    >
+                        <UserX size={16} />
+                    </button>
+                    <div className="w-px h-6 bg-slate-300"></div>
+                    {characters.map(char => (
+                        <button
+                            key={char.id}
+                            onClick={() => handleCharacterSelect(char.id)}
+                            className={`relative w-8 h-8 rounded-full overflow-hidden border-2 transition-all ${currentSelectedCharId === char.id ? 'border-magic-blue scale-110 ring-1 ring-offset-1 ring-magic-blue' : 'border-transparent opacity-70 hover:opacity-100'}`}
+                            title={`Use ${char.name}`}
+                        >
+                             <img src={`data:image/png;base64,${char.imageData}`} className="w-full h-full object-cover" alt={char.name} />
+                        </button>
+                    ))}
+                </div>
+                <span className="text-xs text-white font-bold shadow-black drop-shadow-md pointer-events-none">Select Character</span>
+            </div>
+          )}
         </div>
 
         {/* Right: Text */}
-        <div className="w-full md:w-1/3 h-1/2 md:h-full bg-parchment p-6 md:p-8 flex flex-col justify-between relative z-0">
+        <div className="w-full md:w-1/3 h-1/2 md:h-full bg-parchment p-6 md:p-8 flex flex-col justify-between relative z-0 group">
            <div className="absolute top-0 right-0 w-16 h-16 bg-gradient-to-bl from-yellow-100/50 to-transparent rounded-bl-full pointer-events-none"></div>
            
-           <div className="flex-1 flex flex-col justify-center">
-                {/* We show the SHORT text for reading, while audio plays long version */}
-                <p className="font-story text-lg md:text-xl leading-relaxed text-slate-800">
-                    {currentPage.text}
-                </p>
+           <div className="flex-1 flex flex-col justify-center relative">
+                {isEditingText ? (
+                    <div className="flex flex-col gap-4 animate-in fade-in w-full h-full overflow-y-auto">
+                        <div>
+                            <label className="text-xs font-bold text-slate-500 uppercase mb-1 block">Display Text (Short)</label>
+                            <textarea 
+                                value={editedText}
+                                onChange={e => setEditedText(e.target.value)}
+                                className="w-full p-2 rounded border border-slate-300 font-story text-sm focus:ring-2 focus:ring-magic-blue focus:border-transparent outline-none bg-white text-slate-900"
+                                rows={3}
+                            />
+                        </div>
+                        <div>
+                            <label className="text-xs font-bold text-slate-500 uppercase mb-1 block">Voiceover Script (Long)</label>
+                            <textarea 
+                                value={editedVoiceover}
+                                onChange={e => setEditedVoiceover(e.target.value)}
+                                className="w-full p-2 rounded border border-slate-300 font-story text-sm focus:ring-2 focus:ring-magic-blue focus:border-transparent outline-none bg-white text-slate-900"
+                                rows={6}
+                            />
+                        </div>
+                        <div className="flex gap-2 justify-end">
+                            <button 
+                                onClick={() => setIsEditingText(false)} 
+                                className="px-3 py-1 text-sm text-slate-500 hover:text-slate-800 transition-colors"
+                            >
+                                Cancel
+                            </button>
+                            <button 
+                                onClick={handleSaveTextEdit} 
+                                className="px-4 py-1 text-sm bg-magic-blue text-white rounded font-bold hover:bg-blue-600 transition-colors"
+                            >
+                                Save & Update
+                            </button>
+                        </div>
+                    </div>
+                ) : (
+                    <>
+                        <button 
+                            onClick={handleStartTextEdit}
+                            className="absolute top-0 right-0 p-2 text-slate-300 hover:text-magic-purple opacity-0 group-hover:opacity-100 transition-opacity duration-300 z-10"
+                            title="Edit Text & Transcript"
+                        >
+                            <Pencil size={18} />
+                        </button>
+                        <p className="font-story text-lg md:text-xl leading-relaxed text-slate-800 whitespace-pre-wrap">
+                            {currentPage.text}
+                        </p>
+                    </>
+                )}
                 
-                <div className="mt-6 flex justify-center md:justify-start">
-                    <button 
-                        onClick={toggleAudio}
-                        className={`flex items-center gap-2 px-3 py-1 rounded-full text-sm font-bold transition-all ${
-                            isPlayingAudio 
-                                ? "bg-magic-blue text-white shadow-md scale-105" 
-                                : currentPage.audioData 
-                                    ? "bg-slate-200 text-slate-600 hover:bg-slate-300" 
-                                    : "opacity-50 cursor-wait"
-                        }`}
-                        disabled={!currentPage.audioData}
-                    >
-                        {isPlayingAudio ? <Volume2 size={16} className="animate-pulse"/> : <VolumeX size={16}/>}
-                        {isPlayingAudio ? "Narrating..." : "Play"}
-                    </button>
-                </div>
+                {!isEditingText && (
+                    <div className="mt-6 flex justify-center md:justify-start">
+                        <button 
+                            onClick={toggleAudio}
+                            className={`flex items-center gap-2 px-3 py-1 rounded-full text-sm font-bold transition-all ${
+                                isPlayingAudio 
+                                    ? "bg-magic-blue text-white shadow-md scale-105" 
+                                    : currentPage.audioData 
+                                        ? "bg-slate-200 text-slate-600 hover:bg-slate-300" 
+                                        : "opacity-50 cursor-wait"
+                            }`}
+                            disabled={!currentPage.audioData}
+                        >
+                            {isPlayingAudio ? <Volume2 size={16} className="animate-pulse"/> : <VolumeX size={16}/>}
+                            {isPlayingAudio ? "Narrating..." : currentPage.isGeneratingAudio ? "Generating Audio..." : "Play"}
+                        </button>
+                    </div>
+                )}
            </div>
 
            <div className="mt-4 text-center flex justify-center">

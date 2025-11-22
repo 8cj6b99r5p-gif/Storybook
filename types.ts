@@ -20,6 +20,8 @@ export interface Character {
 }
 
 export interface Story {
+  id: string;
+  createdAt: number;
   title: string;
   lesson: string;
   pages: StoryPage[];
@@ -32,6 +34,7 @@ export enum AppState {
   CHARACTER_SETUP = 'CHARACTER_SETUP',
   GENERATING_STORY = 'GENERATING_STORY',
   VIEWING_BOOK = 'VIEWING_BOOK',
+  VIEWING_LIBRARY = 'VIEWING_LIBRARY',
   ERROR = 'ERROR'
 }
 
